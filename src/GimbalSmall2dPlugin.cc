@@ -32,13 +32,15 @@ class gazebo::GimbalSmall2dPluginPrivate
 {
   /// \brief Callback when a command string is received.
   /// \param[in] _msg Mesage containing the command string
-  public: void OnStringMsg(ConstGzStringPtr &_msg);
+  public: void TiltOnStringMsg(ConstGzStringPtr &_msg);
+  public: void PanOnStringMsg(ConstGzStringPtr &_msg);
 
   /// \brief A list of event connections
   public: std::vector<event::ConnectionPtr> connections;
 
   /// \brief Subscriber to the gimbal command topic
-  public: transport::SubscriberPtr sub;
+  public: transport::SubscriberPtr tiltSub;
+  public: transport::SubscriberPtr rollSub;
 
   /// \brief Publisher to the gimbal status topic
   public: transport::PublisherPtr pub;
@@ -49,8 +51,12 @@ class gazebo::GimbalSmall2dPluginPrivate
   /// \brief Joint for tilting the gimbal
   public: physics::JointPtr tiltJoint;
 
+  /// \brief Joint for rolling the gimbal
+  public: physics::JointPtr rollJoint;
+
   /// \brief Command that updates the gimbal tilt angle
-  public: double command = IGN_PI_2;
+  public: double tiltSetpoint = -IGN_PI_2;
+  public: double rollSetpoint = 0.0;
 
   /// \brief Pointer to the transport node
   public: transport::NodePtr node;
@@ -66,7 +72,6 @@ class gazebo::GimbalSmall2dPluginPrivate
 GimbalSmall2dPlugin::GimbalSmall2dPlugin()
   : dataPtr(new GimbalSmall2dPluginPrivate)
 {
-  this->dataPtr->pid.Init(1, 0, 0, 0, 0, 1.0, -1.0);
 }
 
 /////////////////////////////////////////////////
@@ -75,16 +80,37 @@ void GimbalSmall2dPlugin::Load(physics::ModelPtr _model,
 {
   this->dataPtr->model = _model;
 
-  std::string jointName = "tilt_joint";
-  if (_sdf->HasElement("joint"))
+  std::string tiltJointName = "tilt_joint";
+  if (_sdf->HasElement("tilt_joint"))
   {
-    jointName = _sdf->Get<std::string>("joint");
+    tiltJointName = _sdf->Get<std::string>("tilt_joint");
   }
-  this->dataPtr->tiltJoint = this->dataPtr->model->GetJoint(jointName);
+  this->dataPtr->tiltJoint = this->dataPtr->model->GetJoint(tiltJointName);
+
+  std::string rollJointName = "roll_joint";
+  if (_sdf->HasElement("roll_joint"))
+  {
+    rollJointName = _sdf->Get<std::string>("roll_joint");
+  }
+  this->dataPtr->rollJoint = this->dataPtr->model->GetJoint(rollJointName);
+
+  std::vector<double> PID = {2, 0, 0};
+  if (_sdf->HasElement("pid"))
+  {
+    std::string PID_string = _sdf->Get<std::string>("pid");
+    std::stringstream ss(PID_string);
+
+    ss >> PID[0];
+    ss >> PID[1];
+    ss >> PID[2];
+  }
+
+  this->dataPtr->pid.Init(PID[0], PID[1], PID[2], 0, 0, 1.0, -1.0);
+
   if (!this->dataPtr->tiltJoint)
   {
-    std::string scopedJointName = _model->GetScopedName() + "::" + jointName;
-    gzwarn << "joint [" << jointName
+    std::string scopedJointName = _model->GetScopedName() + "::" + tiltJointName;
+    gzwarn << "joint [" << tiltJointName
            << "] not found, trying again with scoped joint name ["
            << scopedJointName << "]\n";
     this->dataPtr->tiltJoint = this->dataPtr->model->GetJoint(scopedJointName);
@@ -92,7 +118,7 @@ void GimbalSmall2dPlugin::Load(physics::ModelPtr _model,
   if (!this->dataPtr->tiltJoint)
   {
     gzerr << "GimbalSmall2dPlugin::Load ERROR! Can't get joint '"
-          << jointName << "' " << endl;
+          << tiltJointName << "' " << endl;
   }
 }
 
@@ -110,8 +136,13 @@ void GimbalSmall2dPlugin::Init()
 
   std::string topic = std::string("~/") +  this->dataPtr->model->GetName() +
     "/gimbal_tilt_cmd";
-  this->dataPtr->sub = this->dataPtr->node->Subscribe(topic,
-      &GimbalSmall2dPluginPrivate::OnStringMsg, this->dataPtr.get());
+  this->dataPtr->tiltSub = this->dataPtr->node->Subscribe(topic,
+      &GimbalSmall2dPluginPrivate::TiltOnStringMsg, this->dataPtr.get());
+
+  topic = std::string("~/") +  this->dataPtr->model->GetName() +
+    "/gimbal_roll_cmd";
+  this->dataPtr->rollSub = this->dataPtr->node->Subscribe(topic,
+      &GimbalSmall2dPluginPrivate::PanOnStringMsg, this->dataPtr.get());
 
   this->dataPtr->connections.push_back(event::Events::ConnectWorldUpdateBegin(
           std::bind(&GimbalSmall2dPlugin::OnUpdate, this)));
@@ -124,9 +155,14 @@ void GimbalSmall2dPlugin::Init()
 }
 
 /////////////////////////////////////////////////
-void GimbalSmall2dPluginPrivate::OnStringMsg(ConstGzStringPtr &_msg)
+void GimbalSmall2dPluginPrivate::TiltOnStringMsg(ConstGzStringPtr &_msg)
 {
-  this->command = atof(_msg->data().c_str());
+  this->tiltSetpoint = atof(_msg->data().c_str());
+}
+
+void GimbalSmall2dPluginPrivate::PanOnStringMsg(ConstGzStringPtr &_msg)
+{
+  this->rollSetpoint = atof(_msg->data().c_str());
 }
 
 /////////////////////////////////////////////////
@@ -136,10 +172,12 @@ void GimbalSmall2dPlugin::OnUpdate()
     return;
 
   #if GAZEBO_MAJOR_VERSION >= 9
-    double angle = this->dataPtr->tiltJoint->Position(0);
+    double tiltAngle = this->dataPtr->tiltJoint->Position(0);
+    double rollAngle = this->dataPtr->rollJoint->Position(0);
     common::Time time = this->dataPtr->model->GetWorld()->SimTime();
   #else
-    double angle = this->dataPtr->tiltJoint->GetAngle(0).Radian();
+    double tiltAngle = this->dataPtr->tiltJoint->GetAngle(0).Radian();
+    double rollAngle = this->dataPtr->rollJoint->GetAngle(0).Radian();
     common::Time time = this->dataPtr->model->GetWorld()->GetSimTime();
   #endif
 
@@ -151,9 +189,16 @@ void GimbalSmall2dPlugin::OnUpdate()
   else if (time > this->dataPtr->lastUpdateTime)
   {
     double dt = (this->dataPtr->lastUpdateTime - time).Double();
-    double error = angle - this->dataPtr->command;
-    double force = this->dataPtr->pid.Update(error, dt);
+
+    double tiltError = tiltAngle - this->dataPtr->tiltSetpoint;
+    double rollError = rollAngle - this->dataPtr->rollSetpoint;
+
+    double force = this->dataPtr->pid.Update(tiltError, dt);
     this->dataPtr->tiltJoint->SetForce(0, force);
+
+    force = this->dataPtr->pid.Update(rollError, dt);
+    this->dataPtr->rollJoint->SetForce(0, force);
+
     this->dataPtr->lastUpdateTime = time;
   }
 
@@ -162,7 +207,7 @@ void GimbalSmall2dPlugin::OnUpdate()
   {
     i = 0;
     std::stringstream ss;
-    ss << angle;
+    ss << "Tilt: " << tiltAngle << "Roll: " << rollAngle;
     gazebo::msgs::GzString m;
     m.set_data(ss.str());
     this->dataPtr->pub->Publish(m);
