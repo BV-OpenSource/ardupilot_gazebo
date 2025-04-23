@@ -14,6 +14,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${GAZEBO_CXX_FLAGS}")
 find_package(PkgConfig)
 pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0)
 pkg_check_modules(GST_APP REQUIRED gstreamer-app-1.0)
+find_package(OpenCV)
 
 if("${GAZEBO_VERSION}" VERSION_LESS "7.0")
     message(FATAL_ERROR "You need at least Gazebo 7.0. Your version: ${GAZEBO_VERSION}")
